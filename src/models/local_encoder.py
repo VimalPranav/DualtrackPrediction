@@ -13,10 +13,10 @@ from src.models.utils import (
     apply_model_chunked,
     temporal_tiled_exact,
 )
-from src.models.spatio_temporal_attn import SimpleTemporalAttn
+
+from .mamba_temporal import SimpleTemporalMamba
 from .model_registry import get_model, register_model as _register_model
 from src.models.video_resnet import VideoResnetWrapperForFeatureMaps
-
 
 MODELS = []
 
@@ -24,7 +24,6 @@ MODELS = []
 def register_model(fn):
     MODELS.append(fn.__name__)
     return _register_model(fn)
-
 
 class VideoResnetTrackingEstimator(LocalEncoderTrackingEstimator, nn.Module):
     def __init__(
@@ -201,7 +200,7 @@ class FeatureExtractorWithSpatialSelfAttentionV1(
             backbone_features = None
 
         return self(frames, backbone_features)
-
+    
 
 @register_model
 def cnn_sp_attn(
@@ -250,12 +249,12 @@ class LocalEncoderSPTAttn(
     def __init__(
         self,
         backbone,
-        temporal_encoder,
+        mamba_encoder,
         features_only=False,    
     ):
         super().__init__()
         self.backbone = backbone
-        self.temporal_encoder = temporal_encoder
+        self.mamba_encoder = mamba_encoder
         self.features_only = features_only
 
     # def forward_intermediates(self, x):
@@ -283,7 +282,7 @@ class LocalEncoderSPTAttn(
         if self.features_only:
             return x
 
-        return self.temporal_encoder(x)
+        return self.mamba_encoder(x)
 
 
 class TrackingEstimatorWithSequenceBackbone(nn.Module): 
@@ -324,12 +323,12 @@ def cnn_sp_attn_then_temp_attn(
     backbone_cfg['features_only'] = True
     backbone = get_model(**backbone_cfg)
     backbone = FrozenModuleWrapper(backbone, frozen=freeze_backbone, always_eval_mode=keep_backbone_in_eval_mode)
-    temporal_encoder = SimpleTemporalAttn(
+    mamba_encoder = SimpleTemporalMamba(
         **kwargs, hidden_size=hidden_size, features_only=features_only
     )
 
     return LocalEncoderSPTAttn(
-        backbone, temporal_encoder
+        backbone, mamba_encoder
     )
 
 

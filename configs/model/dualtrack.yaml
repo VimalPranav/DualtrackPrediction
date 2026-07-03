@@ -1,3 +1,0 @@
-name: dualtrack_fusion_model
-local_encoder_cfg: 
-  name: dualtrack_loc_enc_stg3_legacy
