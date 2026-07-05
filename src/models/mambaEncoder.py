@@ -40,9 +40,8 @@ class MambaEncoder(nn.Module):
     def forward(self, x):
 
         for layer in self.layers:
-
+            
             x = layer(x)
-
             x = self.dropout(x)
 
         return x

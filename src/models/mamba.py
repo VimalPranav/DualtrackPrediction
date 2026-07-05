@@ -34,48 +34,36 @@ class MambaBlock(nn.Module):
 
         inner_dim = d_model * expand
 
-        # --------------------------------
-        # RMSNorm
-        # --------------------------------
+        # RMSNorm applied
 
         self.norm = RMSNorm(d_model)
 
-        # --------------------------------
         # Input Projection
-        # --------------------------------
 
         self.in_proj = nn.Linear(
             d_model,
             inner_dim
         )
 
-        # --------------------------------
         # Temporal Convolution
-        # --------------------------------
 
         self.conv = DepthwiseConv1D(
             inner_dim // 2,
             kernel_size
         )
 
-        # --------------------------------
         # Selective State Space
-        # --------------------------------
 
         self.ssm = SelectiveScan(
             d_model=inner_dim // 2,
             d_state=d_state
         )
 
-        # --------------------------------
         # Gate
-        # --------------------------------
 
         self.gate = SiLUGate()
 
-        # --------------------------------
         # Output Projection
-        # --------------------------------
 
         self.out_proj = nn.Linear(
             inner_dim // 2,
@@ -86,21 +74,9 @@ class MambaBlock(nn.Module):
 
         residual = x
 
-        # ----------------------------
-        # RMSNorm
-        # ----------------------------
-
         x = self.norm(x)
 
-        # ----------------------------
-        # Expand Features
-        # ----------------------------
-
         x = self.in_proj(x)
-
-        # ----------------------------
-        # Split
-        # ----------------------------
 
         x_part, gate = torch.chunk(
             x,
@@ -108,41 +84,21 @@ class MambaBlock(nn.Module):
             dim=-1
         )
 
-        # ----------------------------
-        # Temporal Conv
-        # ----------------------------
-
         x_part = self.conv(
             x_part
         )
 
-        # ----------------------------
-        # State Space
-        # ----------------------------
-
         x_part = self.ssm(
             x_part
         )
-
-        # ----------------------------
-        # Gating
-        # ----------------------------
 
         x_part = self.gate(
             x_part,
             gate
         )
 
-        # ----------------------------
-        # Project Back
-        # ----------------------------
-
         x_part = self.out_proj(
             x_part
         )
-
-        # ----------------------------
-        # Residual
-        # ----------------------------
 
         return residual + x_part

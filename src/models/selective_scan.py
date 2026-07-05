@@ -25,9 +25,9 @@ class SelectiveScan(nn.Module):
         self.d_state = d_state
 
         # Input-dependent gates
-        self.delta_proj = nn.Linear(d_model, d_state)
-        self.B_proj = nn.Linear(d_model, d_state)
-        self.C_proj = nn.Linear(d_model, d_state)
+        self.delta_proj = nn.Linear(d_model, d_state)       # How quickly the memory should change?
+        self.B_proj = nn.Linear(d_model, d_state)           # How much current frame enters memory?
+        self.C_proj = nn.Linear(d_model, d_state)           # How much memory becomes output?
 
         # Hidden state transition
         self.A = nn.Parameter(
@@ -62,25 +62,21 @@ class SelectiveScan(nn.Module):
 
             xt = x[:, t]
 
-            # --------------------------
             # Input-dependent parameters
-            # --------------------------
 
-            delta = F.softplus(
+            delta = F.softplus(                # ensures positive answer
                 self.delta_proj(xt)
             )
 
-            B_t = torch.tanh(
+            B_t = torch.tanh(                  # range [-1,1]
                 self.B_proj(xt)
             )
 
-            C_t = torch.sigmoid(
+            C_t = torch.sigmoid(               # range [0,1]
                 self.C_proj(xt)
             )
 
-            # --------------------------
             # State update
-            # --------------------------
 
             A = torch.exp(
                 -delta * self.A
@@ -92,9 +88,7 @@ class SelectiveScan(nn.Module):
                 B_t
             )
 
-            # --------------------------
             # Output
-            # --------------------------
 
             y = C_t * h
 

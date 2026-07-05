@@ -3,10 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# --------------------------------------------------
-# RMSNorm
-# --------------------------------------------------
-
 class RMSNorm(nn.Module):
     """
     Root Mean Square Layer Normalization
@@ -33,9 +29,6 @@ class RMSNorm(nn.Module):
         return self.weight * x
 
 
-# --------------------------------------------------
-# Depthwise Temporal Convolution
-# --------------------------------------------------
 
 class DepthwiseConv1D(nn.Module):
     """
@@ -66,22 +59,17 @@ class DepthwiseConv1D(nn.Module):
 
     def forward(self, x):
 
-        # (B,T,D)
-        x = x.transpose(1,2)
+        x = x.transpose(1,2)   # coz (B,D,T) is expected by Conv1D
 
         x = self.conv(x)
 
-        # remove extra padding
-        x = x[:,:,:-3]
+        x = x[:,:,:-3]         # remove extra padding
 
         x = x.transpose(1,2)
 
         return x
 
 
-# --------------------------------------------------
-# SiLU Gate
-# --------------------------------------------------
 
 class SiLUGate(nn.Module):
 
