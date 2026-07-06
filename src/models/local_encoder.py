@@ -332,53 +332,6 @@ def cnn_sp_attn_then_temp_attn(
     )
 
 
-@register_model
-def cnn_sp_attn_then_roformer(
-    *,
-    backbone_cfg=dict(name="cnn_sp_attn"),
-    freeze_backbone=True,
-    roformer_model="roformer_small",
-    **kwargs,
-):
-    """
-    Attaches a temporal attention module to the output of a pooled  spatial attention module.
-
-    Args:
-        backbone_cfg (dict): Configuration for the backbone model (should be cnn).
-        freeze_backbone (bool): Whether to freeze the backbone model.
-        input_mode (str): Whether the input to the model is images or features. If images, the backbone is applied to the input. If features, the input is assumed to be the output of the backbone.
-        **kwargs: Additional arguments to pass to the temporal attention module.
-    """
-
-    backbone_cfg = dict(**backbone_cfg)
-    backbone_cfg['features_only'] = True
-    backbone = get_model(**backbone_cfg) 
-    backbone = FrozenModuleWrapper(backbone, frozen=freeze_backbone)
-    
-    class RoFormerWrapper(nn.Module): 
-        def __init__(self, model):
-            super().__init__()
-            self.model = model
-        
-        def forward(self, x): 
-            x = self.model(x)
-
-            return x['x_norm_patchtokens']
-
-    from .roformer import roformer as roformer_models
-    roformer = roformer_models.__dict__[roformer_model](
-        **kwargs
-    )
-    roformer.init_weights()
-    embed_dim = roformer.embed_dim
-    roformer = RoFormerWrapper(roformer)
-
-    backbone = nn.Sequential(
-        backbone, roformer
-    )
-    
-    return TrackingEstimatorWithSequenceBackbone(backbone, embed_dim=embed_dim)
-
 
 @register_model
 def dualtrack_loc_enc_stg1(
