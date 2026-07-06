@@ -24,8 +24,6 @@ class LocalEncoderTrackingEstimator(BaseTrackingEstimator):
     def predict(self, batch) -> torch.Tensor:
         if "images" in batch:
             images = batch["images"].to(self.device)
-            B, C, N, H, W = images.shape
-            # targets = batch["targets"].to(args.device)
             outputs = self(images)
         else:
             outputs = self(batch["image_features"].to(self.device))
