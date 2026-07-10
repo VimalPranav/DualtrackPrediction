@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
 
-from models.layers import (
+from src.models.layers import (
     RMSNorm,
     DepthwiseConv1D,
     SiLUGate
 )
 
-from models.selective_scan import (
+from src.models.selective_scan import (
     SelectiveScan
 )
 

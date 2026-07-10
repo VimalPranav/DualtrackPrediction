@@ -19,6 +19,11 @@ experiments
 setup.sh
 wandb/
 
+venv/
+processed_data/
+wandb/
+experiments/
+
 **/__pycache__/** 
 
 .venv

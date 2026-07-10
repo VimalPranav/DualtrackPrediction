@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from models.mambaEncoder import MambaEncoder
+from src.models.mambaEncoder import MambaEncoder
 
 
 class SimpleTemporalMamba(nn.Module):

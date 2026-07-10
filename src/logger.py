@@ -41,11 +41,12 @@ class Logger(ABC):
 
     _registry = {}
 
-    def __init_subclass__(cls, **kwargs):
-        name = kwargs.pop("name")
-        
+    def __init_subclass__(cls, logger_name=None, **kwargs):
         super().__init_subclass__(**kwargs)
-        cls._registry[name] = cls
+        
+        if logger_name is not None:
+            cls._registry[logger_name] = cls
+
 
     @classmethod
     def get_logger(cls, name, dir, config, *args, **kwargs):
@@ -191,7 +192,7 @@ class Logger(ABC):
         return config
 
 
-class NullLogger(Logger, name="null"):
+class NullLogger(Logger, logger_name="null"):
     def __init__(self, dir, config, *args, **kwargs):
         dir = tempfile.mkdtemp()
         super().__init__(dir, config, *args, **kwargs)
@@ -201,13 +202,13 @@ class NullLogger(Logger, name="null"):
         print(d)
 
 
-class ConsoleLogger(Logger, name="console"):
+class ConsoleLogger(Logger, logger_name="console"):
     def log_impl(self, d: dict, global_step: Optional[int] = None):
         print(f"Logger - global step {global_step}:")
         print(d)
 
 
-class FileLogger(Logger, name="file"):
+class FileLogger(Logger, logger_name="file"):
 
     def log_impl(self, d: dict, global_step: Optional[int] = None):
         with open(os.path.join(self.dir, "metrics.jsonl"), "a") as f:
@@ -216,7 +217,7 @@ class FileLogger(Logger, name="file"):
             f.write("\n")
 
 
-class TensorBoardLogger(Logger, name="tensorboard"):
+class TensorBoardLogger(Logger, logger_name="tensorboard"):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.writer = SummaryWriter(log_dir=self.dir)
@@ -229,7 +230,7 @@ class TensorBoardLogger(Logger, name="tensorboard"):
                 self.writer.add_scalar(key, value, global_step)
 
 
-class WandbLogger(Logger, name="wandb"):
+class WandbLogger(Logger, logger_name="wandb"):
     def __init__(
         self,
         dir,

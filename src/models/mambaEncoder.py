@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from models.mamba import MambaBlock
+from src.models.mamba import MambaBlock
 
 
 class MambaEncoder(nn.Module):
