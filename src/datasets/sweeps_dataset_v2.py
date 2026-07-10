@@ -87,15 +87,15 @@ class SweepsDataset(Dataset):
             self.metadata = metadata_table
         elif metadata_csv_path is not None:
             if isinstance(metadata_csv_path, str):
-                self.metadata = pd.read_csv(metadata_csv_path, index_col=0)
+                self.metadata = pd.read_csv(metadata_csv_path, index_col=1)
             else:
-                self.metadata = pd.read_csv(metadata_csv_path[0], index_col=0)
+                self.metadata = pd.read_csv(metadata_csv_path[0], index_col=1)
                 for i in range(len(metadata_csv_path) - 1):
                     new = pd.read_csv(metadata_csv_path[i + 1])
                     self.metadata = pd.concat([self.metadata, new])
         elif name is not None:
             metadata_csv_path = DATASET_INFO[name].data_csv_path
-            self.metadata = pd.read_csv(metadata_csv_path, index_col=0)
+            self.metadata = pd.read_csv(metadata_csv_path, index_col=1)
         else:
             raise ValueError(
                 f"One of name, metadata_csv_path or metadata_table should be specified."

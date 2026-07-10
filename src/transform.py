@@ -62,6 +62,10 @@ class Add6DOFTargets:
 
         gt_tracking_world = item["tracking"]
 
+        R = gt_tracking_world[0, :3, :3]
+        print("Det =", np.linalg.det(R))
+        print(R)
+
         targets_absolute = matrix_to_pose_vector(gt_tracking_world)
         if "absolute" in self.targets_mode:
             item["targets_absolute"] = torch.tensor(
