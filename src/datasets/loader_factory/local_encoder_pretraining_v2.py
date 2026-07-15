@@ -1,5 +1,14 @@
 from dataclasses import dataclass, field
 import torch
+class CachedFeaturesTransform:
+    def __init__(self, keys):
+        self.keys = keys
+    def __call__(self, item):
+        for key in self.keys:
+            if key in item:
+                item[key] = torch.tensor(item[key])
+        return item
+
 from torch.utils.data import DataLoader
 import numpy as np
 
@@ -14,7 +23,7 @@ def get_loaders(
     val_dataset_name: str | dict[str, str] | None = None,
     sequence_length_train: int | None = None,
     batch_size: int = 1,
-    num_dataloader_workers: int = 4,
+    num_dataloader_workers: int = 20,
     resize_to: tuple[int, int] | None = None,
     tus_rec_crop: bool = False,
     crop_size: tuple[int, int] | None = (256, 256),
@@ -25,8 +34,8 @@ def get_loaders(
     drop_keys: list[str] | None = None,
     subsequence_samples_per_scan: str = "one",
     debug: bool = False,
-    persistent_workers: bool = False,
-    pin_memory: bool = False,
+    persistent_workers: bool = True,
+    pin_memory: bool = True,
     features_cache_map={},
     shuffle_train=True,
     sampling="epoch",
@@ -67,10 +76,9 @@ def get_loaders(
     if drop_keys is None:
         drop_keys = []
 
-    def cached_features_transform(item):
-        for key in features_cache_map.keys():
-            item[key] = torch.tensor(item[key]).float()
-        return item
+
+    cached_features_transform = CachedFeaturesTransform(list(cached_features_map.keys()))
+
 
     def get_transform(train=True):
         return T.Compose(

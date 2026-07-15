@@ -13,7 +13,7 @@ class LoaderArgs:
     dataset: str = "tus-rec"
     sequence_length_train: int | None = None
     batch_size: int = 1
-    num_dataloader_workers: int = 4
+    num_dataloader_workers: int = 20
     resize_to: tuple[int, int] | None = None
     tus_rec_crop: bool = False
     crop_size: tuple[int, int] | None = (256, 256)
@@ -26,14 +26,19 @@ class LoaderArgs:
     subsequence_samples_per_scan: str = "one"
 
 
+class CachedFeaturesTransform:
+    def __init__(self, keys):
+        self.keys = keys
+    def __call__(self, item):
+        for key in self.keys:
+            item[key] = torch.tensor(item[key])
+        return item
+
 def get_loaders(args: LoaderArgs = LoaderArgs(), debug=False):
 
     from src import transform as T
 
-    def cached_features_transform(item):
-        for key in args.cached_features_map.keys():
-            item[key] = torch.tensor(item[key])
-        return item
+    cached_features_transform = CachedFeaturesTransform(list(args.cached_features_map.keys()))
 
     def get_transform(train=True):
         return T.Compose(
@@ -130,7 +135,7 @@ def get_loaders_simple(
     cached_features_file=None,
     sequence_length_train=None,
     batch_size=1, 
-    num_dataloader_workers=4, 
+    num_dataloader_workers=20, 
     mode="train",
     debug=False, 
     **kwargs
@@ -146,7 +151,7 @@ def get_loaders_simple(
             num_dataloader_workers=num_dataloader_workers,
             resize_to=None,
             random_crop=use_augmentations,
-            random_horizontal_flip=use_augmentations,
+            random_horizontal_flip=False,
             random_reverse_sweep=use_augmentations,
             validation_mode="full",
             drop_keys=["images_downsampled-224"],
@@ -174,7 +179,7 @@ def get_loaders_optimized(
     val_dataset_name: str | None = None,
     sequence_length_train: int | None = None,
     batch_size: int = 1,
-    num_dataloader_workers: int = 4,
+    num_dataloader_workers: int = 20,
     resize_to: tuple[int, int] | None = None,
     tus_rec_crop: bool = False,
     crop_size: tuple[int, int] | None = (256, 256),
@@ -208,10 +213,9 @@ def get_loaders_optimized(
     if drop_keys is None:
         drop_keys = []
 
-    def cached_features_transform(item):
-        for key in cached_features_map.keys():
-            item[key] = torch.tensor(item[key])
-        return item
+
+    cached_features_transform = CachedFeaturesTransform(list(cached_features_map.keys()))
+
 
     class OptimizedFramesArrayToTensor:
         """Optimized tensor conversion using OpenCV for faster resizing."""
@@ -400,7 +404,7 @@ def get_loaders_kw(
     val_dataset_name: str | None = None,
     sequence_length_train: int | None = None,
     batch_size: int = 1,
-    num_dataloader_workers: int = 4,
+    num_dataloader_workers: int = 20,
     resize_to: tuple[int, int] | None = None,
     tus_rec_crop: bool = False,
     crop_size: tuple[int, int] | None = (256, 256),
@@ -448,10 +452,9 @@ def get_loaders_kw(
     if drop_keys is None:
         drop_keys = []
 
-    def cached_features_transform(item):
-        for key in cached_features_map.keys():
-            item[key] = torch.tensor(item[key])
-        return item
+
+    cached_features_transform = CachedFeaturesTransform(list(cached_features_map.keys()))
+
 
     def get_transform(train=True):
         return T.Compose(

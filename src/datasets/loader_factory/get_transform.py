@@ -1,5 +1,14 @@
 from src import transform as T
 import torch
+class CachedFeaturesTransform:
+    def __init__(self, keys):
+        self.keys = keys
+    def __call__(self, item):
+        for key in self.keys:
+            if key in item:
+                item[key] = torch.tensor(item[key])
+        return item
+
 from functools import partial
 
 
@@ -132,10 +141,9 @@ def local_encoder_transform(
     sequence_keys=["images", "tracking"],
 ):
 
-    def cached_features_transform(item):
-        for key in features_cache_map.keys():
-            item[key] = torch.tensor(item[key]).float()
-        return item
+
+    cached_features_transform = CachedFeaturesTransform(list(cached_features_map.keys()))
+
 
     def get_transform(train=True):
         return T.Compose(

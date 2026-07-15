@@ -3,6 +3,15 @@ from typing import Optional, List
 from src import transform as T
 from src.datasets import SweepsDataset
 import torch
+class CachedFeaturesTransform:
+    def __init__(self, keys):
+        self.keys = keys
+    def __call__(self, item):
+        for key in self.keys:
+            if key in item:
+                item[key] = torch.tensor(item[key])
+        return item
+
 from src.batch_collator import BatchCollator
 
 
