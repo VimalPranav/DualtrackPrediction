@@ -155,13 +155,11 @@ class FeatureExtractorWithSpatialSelfAttentionV1(
         )
         self.fc = torch.nn.Linear(hidden_size, 6)
 
-    def forward(self, x):
-        if self.input_type == 'frames':
-            return self._forward_impl(frames=x)
-        elif self.input_type == 'features':
-            return self._forward_impl(backbone_feature_maps=x)
-        else:
-            raise ValueError(f"Unknown input type: {self.input_type}")
+    def forward(self, frames=None, backbone_feature_maps=None):
+        return self._forward_impl(
+            frames=frames,
+            backbone_feature_maps=backbone_feature_maps,
+        )
 
     def _forward_impl(self, frames=None, backbone_feature_maps=None):
 

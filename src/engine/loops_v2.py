@@ -269,6 +269,8 @@ def run_training_one_epoch(
                 epoch,
             )
 
+    return total_loss / len(loader)
+
 
 def run_validation_loss_loop(
     model: nn.Module,
@@ -507,7 +509,7 @@ def run_training(
         # save checkpoint
         logger.save_checkpoint(get_state())
 
-        run_training_one_epoch(
+        train_loss = run_training_one_epoch(
             model,
             train_loader,
             optimizer,
@@ -522,6 +524,7 @@ def run_training(
             use_amp=use_amp,
             use_bfloat=use_bfloat
         )
+        logging.info(f"Epoch {epoch}: Train Loss = {train_loss:.6f}")
 
         if (epoch + 1) % validate_every_n_epochs == 0:
             if validation_mode == "full":
@@ -560,6 +563,11 @@ def run_training(
                         log_image_indices=log_image_indices,
                     )
 
+                logging.info(
+                    f"Epoch {epoch}: Validation {tracked_metric} = "
+                    f"{metrics[tracked_metric]:.6f}"
+                )
+
                 if (m := metrics[tracked_metric]) < best_score:
                     logging.info(
                         f"Best metric ({tracked_metric}:{m:.2f}) observed - saving"
@@ -579,6 +587,8 @@ def run_training(
                     use_bfloat=use_bfloat,
                     use_amp=use_amp,
                 )
+                logging.info(f"Epoch {epoch}: Validation Loss = {loss:.6f}")
+                
                 if loss < best_score:
                     logging.info(f"Best metric (val_loss:{loss:.6f}) observed - saving")
 
