@@ -15,6 +15,7 @@ from src.models.utils import (
 )
 
 from .mamba_temporal import SimpleTemporalMamba
+from .spatio_temporal_attn import SimpleTemporalAttn
 from .model_registry import get_model, register_model as _register_model
 from src.models.video_resnet import VideoResnetWrapperForFeatureMaps
 
