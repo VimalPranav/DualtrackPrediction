@@ -44,6 +44,51 @@ def train(cfg):
     torch.cuda.manual_seed_all(cfg.seed + rank)
 
     model = get_model(**cfg.model).to(cfg.device)
+    """
+    print("\n========== Trainable Parameters ==========\n")
+
+    total = 0
+
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name, param.shape)
+            total += param.numel()
+
+    print(f"\nTotal trainable parameters: {total:,}")
+    print("\n=========================================\n")
+
+    print("FC weight norm:",
+        model.backbone.module.fc.weight.norm().item())
+
+    print("FC bias norm:",
+        model.backbone.module.fc.bias.norm().item())
+
+    print("="*80)
+
+    total = 0
+
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            print(f"{name:70} {tuple(p.shape)}")
+            total += p.numel()
+
+    print("\nTotal trainable params:", total)
+    print("="*80)
+
+    print("\nBackbone train mode:", model.backbone.training)
+
+    bn_train = []
+
+    for name, m in model.backbone.named_modules():
+        if isinstance(m, torch.nn.BatchNorm2d):
+            if m.training:
+                bn_train.append(name)
+
+    print("BN layers still in training:", len(bn_train))
+
+    for n in bn_train[:20]:
+        print(n)
+    """
 
     if state:
         model.load_state_dict(state["model"])
@@ -104,7 +149,7 @@ def train(cfg):
         #     return input, target, extra
 
         from src.engine.loops_v2 import run_training as run_training_v2
-        from src.engine.loops_v2 import Task, DefaultTrackingEstimationTask
+        from src.engine.loops_v2 import Task, DefaultTrackingEstimationTask, run_full_evaluation_loop
 
         class GlobalEncoderTask(DefaultTrackingEstimationTask): 
             def forward(self, model: nn.Module, batch: dict, device: torch.device):
@@ -126,6 +171,22 @@ def train(cfg):
             "default": DefaultTrackingEstimationTask(),
         }
         task = task_dict.get(cfg.get('task_name', 'default'), DefaultTrackingEstimationTask())
+
+        print("\nRunning validation before training...\n")
+
+        metrics = run_full_evaluation_loop(
+            model=model,
+            loader=val_loader,
+            task=task,
+            device=cfg.device,
+            use_amp=cfg.use_amp,
+            logger=None,
+            log_metrics=False,
+            **cfg.evaluator_kw
+        )
+
+        print("Initial validation metrics:")
+        print(metrics)
 
         run_training_v2(
             model=model, 

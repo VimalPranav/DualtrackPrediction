@@ -524,7 +524,7 @@ def run_training(
             use_amp=use_amp,
             use_bfloat=use_bfloat
         )
-        logging.info(f"Epoch {epoch}: Train Loss = {train_loss:.6f}")
+        print(f"\nEpoch {epoch}: Train Loss = {train_loss:.6f}")
 
         if (epoch + 1) % validate_every_n_epochs == 0:
             if validation_mode == "full":
@@ -563,7 +563,7 @@ def run_training(
                         log_image_indices=log_image_indices,
                     )
 
-                logging.info(
+                print(
                     f"Epoch {epoch}: Validation {tracked_metric} = "
                     f"{metrics[tracked_metric]:.6f}"
                 )
@@ -588,7 +588,7 @@ def run_training(
                     use_amp=use_amp,
                 )
                 logging.info(f"Epoch {epoch}: Validation Loss = {loss:.6f}")
-                
+
                 if loss < best_score:
                     logging.info(f"Best metric (val_loss:{loss:.6f}) observed - saving")
 

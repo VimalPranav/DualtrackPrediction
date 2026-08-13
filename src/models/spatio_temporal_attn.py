@@ -1083,6 +1083,9 @@ class SimpleTemporalAttn(nn.Module):
         self.fc = nn.Linear(hidden_size, 6)
         self.features_only = features_only
 
+        nn.init.zeros_(self.fc.weight)
+        nn.init.zeros_(self.fc.bias)
+
         if input_size is not None and input_size != hidden_size:
             self.proj = nn.Linear(input_size, hidden_size)
         else: 
@@ -1096,8 +1099,8 @@ class SimpleTemporalAttn(nn.Module):
         if self.features_only:
             return hidden_state
 
-        outputs = self.fc(hidden_state)[:, 1:, :]
-        return outputs
+        delta = self.fc(hidden_state)[:, 1:, :]
+        return delta
 
     def predict(self, data, device):
         return self(data["pooled_cnn_features"].to(device))
