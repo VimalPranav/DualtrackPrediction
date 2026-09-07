@@ -1,7 +1,7 @@
 import torch
 
 ckpt = torch.load(
-    "/home/user/Desktop/ULTRASOUND/DualtrackPrediction/experiments/local_stage2/checkpoint/best.pt",
+    "/home/user/Desktop/ULTRASOUND/DualtrackPrediction_vimal/experiments/local_stage2/checkpoint/best.pt",
     map_location="cpu",
     weights_only=False
 )

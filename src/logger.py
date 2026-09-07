@@ -154,20 +154,75 @@ class Logger(ABC):
             return
         if self.disable_checkpoint:
             return
-        torch.save(obj, os.path.join(self.dir, "checkpoint", name))
+
+        checkpoint_dir = os.path.join(self.dir, "checkpoint")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        final_path = os.path.join(checkpoint_dir, name)
+        temp_path = final_path + ".tmp"
+
+        # Write completely to temporary file first
+        torch.save(obj, temp_path)
+
+        # Replace old checkpoint only after successful save
+        os.replace(temp_path, final_path)
 
     def get_checkpoint(self, name="last.pt"):
-        if not os.path.exists(os.path.join(self.dir, "checkpoint", name)):
-            logging.info(f"Checkpoint {name} not found")
-            return None
+        checkpoint_dir = os.path.join(self.dir, "checkpoint")
+
+        # Try requested checkpoint first
+        checkpoint_path = os.path.join(checkpoint_dir, name)
+
+        if os.path.exists(checkpoint_path):
+            try:
+                state = torch.load(
+                    checkpoint_path,
+                    map_location="cpu",
+                    weights_only=False,
+                )
+
+                logging.info(
+                    f"Loaded checkpoint {name} - keys: {state.keys()}"
+                )
+                return state
+
+            except Exception as e:
+                logging.warning(
+                    f"Failed to load checkpoint {name}: {e}"
+                )
+                logging.warning(
+                    "Checkpoint may be corrupted. Trying best.pt..."
+                )
+
         else:
-            state = torch.load(
-                os.path.join(self.dir, "checkpoint", name),
-                map_location="cpu",
-                weights_only=False,
-            )
-            logging.info(f"Loaded checkpoint {name} - keys: {state.keys()}")
-            return state
+            logging.warning(f"Checkpoint {name} not found.")
+
+        # Fallback to best.pt
+        if name != "best.pt":
+            best_path = os.path.join(checkpoint_dir, "best.pt")
+
+            if os.path.exists(best_path):
+                try:
+                    state = torch.load(
+                        best_path,
+                        map_location="cpu",
+                        weights_only=False,
+                    )
+
+                    logging.info(
+                        f"Successfully loaded fallback checkpoint best.pt "
+                        f"- keys: {state.keys()}"
+                    )
+                    return state
+
+                except Exception as e:
+                    logging.error(
+                        f"Failed to load fallback checkpoint best.pt: {e}"
+                    )
+            else:
+                logging.error("Fallback checkpoint best.pt not found.")
+
+        return None
 
     def set_prefix(self, prefix: Optional[str]):
         self._prefix = prefix

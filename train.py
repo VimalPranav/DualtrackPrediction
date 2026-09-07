@@ -117,7 +117,7 @@ def train(cfg):
         total_epochs=cfg.train.epochs,
         weight_decay=cfg.train.weight_decay,
         lr=cfg.train.lr,
-        state=state,
+        state=None if cfg.get("fine_tune", False) else state,
         use_sam=cfg.train.get("use_sam", False),
         sched_kwargs=cfg.train.get("sched_kwargs", {})
     )

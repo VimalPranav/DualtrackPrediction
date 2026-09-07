@@ -30,8 +30,8 @@ class SelectiveScan(nn.Module):
         self.C_proj = nn.Linear(d_model, d_state)           # How much memory becomes output?
 
         # Hidden state transition
-        self.A = nn.Parameter(
-            torch.randn(d_state) * 0.02
+        self.A_log = nn.Parameter(
+            torch.zeros(d_state)
         )
 
         # Output projection
@@ -53,33 +53,44 @@ class SelectiveScan(nn.Module):
         h = torch.zeros(
             B,
             self.d_state,
-            device=device
+            device=device,
+            dtype=x.dtype
         )
 
-        outputs = []
+        outputs = torch.empty(
+            B,
+            T,
+            D,
+            device=device,
+            dtype=x.dtype
+        )
+        delta_all = F.softplus(
+            self.delta_proj(x)
+        )
+
+        B_all = torch.tanh(
+            self.B_proj(x)
+        )
+
+        C_all = torch.sigmoid(
+            self.C_proj(x)
+        )
+
+        A_base = -torch.exp(self.A_log)
+        
 
         for t in range(T):
 
-            xt = x[:, t]
-
             # Input-dependent parameters
 
-            delta = F.softplus(                # ensures positive answer
-                self.delta_proj(xt)
-            )
-
-            B_t = torch.tanh(                  # range [-1,1]
-                self.B_proj(xt)
-            )
-
-            C_t = torch.sigmoid(               # range [0,1]
-                self.C_proj(xt)
-            )
+            delta = delta_all[:, t]
+            B_t = B_all[:, t]
+            C_t = C_all[:, t]
 
             # State update
 
             A = torch.exp(
-                -delta * self.A
+                delta * A_base
             )
 
             h = (
@@ -87,6 +98,11 @@ class SelectiveScan(nn.Module):
                 +
                 B_t
             )
+
+            if not torch.isfinite(h).all():
+                raise RuntimeError(
+                    f"Hidden state contains NaN/Inf at timestep {t}"
+                )
 
             # Output
 
@@ -96,11 +112,7 @@ class SelectiveScan(nn.Module):
                 y
             )
 
-            outputs.append(y)
+            outputs[:, t] = y
 
-        outputs = torch.stack(
-            outputs,
-            dim=1
-        )
 
         return outputs

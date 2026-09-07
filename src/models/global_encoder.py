@@ -45,7 +45,7 @@ class SimpleModelForSparseTrackingEstimation(BaseTrackingEstimator, nn.Module):
         max_seq_length=1024,
         hidden_size=512,
         pred_mode="local",
-        num_hidden_layers=4,
+        num_hidden_layers=8,
         position_embedding_type="absolute",
         features_only=False,
         **kwargs,
@@ -106,9 +106,11 @@ class SimpleModelForSparseTrackingEstimation(BaseTrackingEstimator, nn.Module):
 
         cls_feature = bert_outputs[:, 0, :]
         frame_features = bert_outputs[:, 1:, :]
+        pose_pred = self.fc(frame_features[:, 1:, :])
 
         if self.features_only:
             return {
+                "pose": pose_pred,
                 "frame_features": frame_features,
                 "cls_feature": cls_feature,
             }
@@ -141,7 +143,7 @@ class SimpleModelForSparseTrackingEstimation(BaseTrackingEstimator, nn.Module):
             pred_matrix = pose_vector_to_rotation_matrix_torch(
                 pred_detached
             )
-            
+
             pred_glob = get_absolute_to_global_transforms_torch(
                 pred_matrix
             )[..., 1:, :, :]
@@ -173,40 +175,57 @@ class SimpleModelForSparseTrackingEstimation(BaseTrackingEstimator, nn.Module):
 
         pred = pred if pred is not None else self.predict(batch)
 
-        targets = batch["targets"].to(device)
-        padding_lengths = batch["padding_size"]
-        crit = nn.MSELoss(reduction="none")
-
-        def _get_loss(pred, targets):
-            B, N, D = (
-                pred.shape
-                if isinstance(pred, torch.Tensor)
-                else list(pred.values())[0].shape
+        if not isinstance(pred, dict):
+            raise TypeError(
+                f"Expected model output to be dict, got {type(pred)}"
             )
 
-            mask = torch.ones(B, N, D, dtype=torch.bool, device=device)
-            for i, padding_length in enumerate(padding_lengths):
-                if padding_length > 0:
-                    mask[i, -padding_length:, :] = 0
+        pose_pred = pred["pose"]
+        targets = batch["targets"].to(device)
 
-            loss = crit(pred, targets)
-            masked_loss = torch.where(mask, loss, torch.nan)
-            mse_loss_val = masked_loss.nanmean()
-            return mse_loss_val
+        padding_lengths = batch["padding_size"]
 
-        if isinstance(pred, dict):
-            loss = torch.tensor(0.0, device=device)
-            if "local" in pred:
-                loss += _get_loss(pred["local"], targets)
-            if "global" in pred:
-                loss += _get_loss(pred["global"], batch["targets_global"].to(device))
-            if "absolute" in pred:
-                loss += _get_loss(
-                    pred["absolute"], batch["targets_absolute"].to(device)
-                )
-            return loss
-        else:
-            return _get_loss(pred, targets)
+        if pose_pred.shape != targets.shape:
+            raise RuntimeError(
+                f"Pose/target shape mismatch: "
+                f"pose_pred={pose_pred.shape}, targets={targets.shape}"
+            )
+
+        crit = nn.MSELoss(reduction="none")
+
+        B, N, D = pose_pred.shape
+
+        mask = torch.ones(
+            B,
+            N,
+            D,
+            dtype=torch.bool,
+            device=device,
+        )
+
+        for i, padding_length in enumerate(padding_lengths):
+
+            if padding_length > 0:
+
+                # Prevent invalid padded pose entries
+                mask[i, -padding_length:, :] = False
+
+        loss = crit(pose_pred, targets)
+
+        masked_loss = torch.where(
+            mask,
+            loss,
+            torch.nan,
+        )
+
+        pose_loss = masked_loss.nanmean()
+
+        if torch.is_grad_enabled() and not pose_loss.requires_grad:
+            raise RuntimeError(
+                "Pose loss is detached from the computation graph!"
+            )
+
+        return pose_loss
 
 
 

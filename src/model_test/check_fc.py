@@ -1,7 +1,7 @@
 import torch
 from src.models import get_model   # adjust if your import is different
 
-ckpt_path = "/home/user/Desktop/ULTRASOUND/DualtrackPrediction/experiments/local_stage2/checkpoint/best.pt"
+ckpt_path = "/home/user/Desktop/ULTRASOUND/DualtrackPrediction_vimal/experiments/local_stage2/checkpoint/best.pt"
 
 stage2 = get_model(
     name="dualtrack_loc_enc_stg2",

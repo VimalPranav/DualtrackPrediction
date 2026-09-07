@@ -14,8 +14,8 @@ from src.models.utils import (
     temporal_tiled_exact,
 )
 
-from .mamba_temporal import SimpleTemporalMamba
 from .spatio_temporal_attn import SimpleTemporalAttn
+from .mamba_temporal import SimpleTemporalMamba
 from .model_registry import get_model, register_model as _register_model
 from src.models.video_resnet import VideoResnetWrapperForFeatureMaps
 
@@ -156,13 +156,14 @@ class FeatureExtractorWithSpatialSelfAttentionV1(
         )
         self.fc = torch.nn.Linear(hidden_size, 6)
 
-    def forward(self, frames=None, backbone_feature_maps=None):
+    def forward(self, frames=None, backbone_feature_maps=None, return_stage2_pose=False):
         return self._forward_impl(
             frames=frames,
             backbone_feature_maps=backbone_feature_maps,
+            return_stage2_pose=return_stage2_pose,
         )
 
-    def _forward_impl(self, frames=None, backbone_feature_maps=None):
+    def _forward_impl(self, frames=None, backbone_feature_maps=None, return_stage2_pose=False):
 
         if backbone_feature_maps is None:
             assert frames is not None
@@ -184,6 +185,12 @@ class FeatureExtractorWithSpatialSelfAttentionV1(
 
         cls_tokens = einops.rearrange(cls_tokens, "(b n) c -> b n c", b=B, n=N)
         if self.features_only:
+            if return_stage2_pose:
+                return {
+                    "features": cls_tokens,
+                    "stage2_pose": self.fc(cls_tokens)[:,1:,:]
+                }
+
             return cls_tokens
 
         outputs = self.fc(cls_tokens)
@@ -248,13 +255,14 @@ class LocalEncoderSPTAttn(
     def __init__(
         self,
         backbone,
-        mamba_encoder,
+        temporal_encoder,
         features_only=False,    
     ):
         super().__init__()
         self.backbone = backbone
-        self.mamba_encoder = mamba_encoder
+        self.temporal_encoder = temporal_encoder
         self.features_only = features_only
+        self.alpha = nn.Parameter(torch.full((6,), -5.0))
 
     # def forward_intermediates(self, x):
     #     if self.use_cache and hasattr(self, "_current_data_ids"):
@@ -276,12 +284,51 @@ class LocalEncoderSPTAttn(
     #         return x
 
     def forward(self, x):
-        x = self.backbone(x)
-        
-        if self.features_only:
-            return x
 
-        return self.mamba_encoder(x)
+        backbone_out = self.backbone(x, return_stage2_pose=True)
+
+        if self.features_only:
+            return backbone_out
+
+        if not hasattr(self, "_printed"):
+            stage2_pose = backbone_out["stage2_pose"]
+
+            print("=" * 60)
+            print("Stage2 pose shape :", stage2_pose.shape)
+            print("Stage2 pose mean  :", stage2_pose.mean().item())
+            print("Stage2 pose std   :", stage2_pose.std().item())
+
+            features = backbone_out["features"]
+            print("Feature shape     :", features.shape)
+
+            self._printed = True
+
+        features = backbone_out["features"]
+        stage2_pose = backbone_out["stage2_pose"]
+
+        delta_pose = self.temporal_encoder(features)
+
+        if not hasattr(self, "_printed_delta"):
+            print("Delta abs mean:", delta_pose.abs().mean().item())
+            print("Delta std     :", delta_pose.std().item())
+            self._printed_delta = True
+
+        gate = torch.sigmoid(self.alpha)
+
+        if not hasattr(self, "_printed_gate"):
+            print("Gate =", gate.detach().cpu())
+            self._printed_gate = True
+
+        prediction = stage2_pose + gate * delta_pose
+
+        if not hasattr(self, "_printed_gate"):
+            print("Gate:", gate)
+            print("Prediction mean:", prediction.mean().item())
+            print("Prediction std :", prediction.std().item())
+            print("=" * 60)
+            self._printed_gate = True
+
+        return prediction
 
 
 class TrackingEstimatorWithSequenceBackbone(nn.Module): 
@@ -322,12 +369,12 @@ def cnn_sp_attn_then_temp_attn(
     backbone_cfg['features_only'] = True
     backbone = get_model(**backbone_cfg)
     backbone = FrozenModuleWrapper(backbone, frozen=freeze_backbone, always_eval_mode=keep_backbone_in_eval_mode)
-    mamba_encoder = SimpleTemporalMamba(
+    temporal_encoder = SimpleTemporalMamba(
         **kwargs, hidden_size=hidden_size, features_only=features_only
     )
 
     return LocalEncoderSPTAttn(
-        backbone, mamba_encoder
+        backbone, temporal_encoder
     )
 
 

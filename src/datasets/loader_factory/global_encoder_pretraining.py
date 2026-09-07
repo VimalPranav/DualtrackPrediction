@@ -20,7 +20,7 @@ class LoaderConfig:
     """Configuration for data"""
 
     dataset: str = "tus-rec"
-    num_workers: int = 4
+    num_workers: int = 12
     sample_mode: Optional[str] = None  # Deprecated setting.
     n_samples: int = (
         64  # Length of subsample sequence generated from the full ultrasound scan.
@@ -64,7 +64,7 @@ def get_loaders(cfg: LoaderConfig, debug=False):
                 ),
                 T.RandomSparseSampleTemporal(cfg.n_samples),
                 (
-                    T.RandomHorizontalFlipImageAndTracking()
+                    T.Identity()
                     if use_augmentations
                     else T.Identity()
                 ),
@@ -146,7 +146,7 @@ def get_loaders(cfg: LoaderConfig, debug=False):
 
 def get_loaders_simple(
     dataset="tus-rec",
-    num_workers=4,
+    num_workers=12,
     in_channels=1,
     use_augmentations=False,
     mean=[0], 

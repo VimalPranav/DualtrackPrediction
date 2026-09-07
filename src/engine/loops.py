@@ -2,6 +2,7 @@ import abc
 from dataclasses import dataclass, field
 import os
 from typing import Callable, Literal
+from xml.parsers.expat import model
 import h5py
 from matplotlib import pyplot as plt
 from tqdm import tqdm
@@ -114,26 +115,50 @@ def run_full_evaluation_loop(
                     data["tracking"][item_idx], data["calibration"][item_idx]
                 )
             elif isinstance(pred, dict):
-                pred_loc = pred["local"]
-                pred_loc_i = pred_loc[item_idx].float().cpu().numpy()
-                pred_glob = pred["global"]
-                pred_glob_i = pred_glob[item_idx].float().cpu().numpy()
-                if "padding_size" in data:
-                    pred_glob_i = pred_glob_i[
-                        : len(pred_glob_i) - data["padding_size"][item_idx]
-                    ]
-                    pred_loc_i = pred_loc_i[
-                        : len(pred_loc_i) - data["padding_size"][item_idx]
-                    ]
-                evaluator.set_current_pred_tracking_from_relative_pose_vector(
-                    pred_loc_i, False
-                )
-                evaluator.set_current_pred_tracking_from_global_pose_vectors(
-                    pred_glob_i
-                )
-                evaluator.set_current_gt_tracking_from_world(
-                    data["tracking"][item_idx], data["calibration"][item_idx]
-                )
+                 if "pose" in pred:
+                    # Current model output:
+                    # pose = relative/local 6-DoF pose
+                    pred_loc_i = pred["pose"][item_idx].float().cpu().numpy()
+
+                    if "padding_size" in data:
+                        padding = data["padding_size"][item_idx]
+                        if padding > 0:
+                            pred_loc_i = pred_loc_i[:-padding]
+
+                    evaluator.set_current_pred_tracking_from_relative_pose_vector(
+                        pred_loc_i
+                    )
+
+                 elif "local" in pred and "global" in pred:
+                    # Models that explicitly predict both local and global poses
+                    pred_loc_i = pred["local"][item_idx].float().cpu().numpy()
+                    pred_glob_i = pred["global"][item_idx].float().cpu().numpy()
+
+                    if "padding_size" in data:
+                        padding = data["padding_size"][item_idx]
+
+                        if padding > 0:
+                            pred_loc_i = pred_loc_i[:-padding]
+                            pred_glob_i = pred_glob_i[:-padding]
+
+                    evaluator.set_current_pred_tracking_from_relative_pose_vector(
+                        pred_loc_i, False
+                    )
+
+                    evaluator.set_current_pred_tracking_from_global_pose_vectors(
+                        pred_glob_i
+                    )
+
+                 else:
+                    raise ValueError(
+                        f"Unexpected dictionary prediction keys: {pred.keys()}"
+                    )
+
+                # Ground truth is common to both cases
+                 evaluator.set_current_gt_tracking_from_world(
+                    data["tracking"][item_idx],
+                    data["calibration"][item_idx],
+                 )
             else:
                 raise ValueError(f"Unexpected prediction output {pred}")
             metrics, figures = evaluator.complete_update(
@@ -232,8 +257,19 @@ def run_training_one_epoch(
                     elif clip_grad_norm:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
 
-                scaler.step(optimizer)
+                current_lr = optimizer.param_groups[0]["lr"]
+
+                scaler.unscale_(optimizer)  # required before clipping when using GradScaler
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+                if torch.isfinite(grad_norm):
+                    scaler.step(optimizer)
+                else:
+                    logging.warning(f"Skipping step at epoch={epoch}: grad_norm={grad_norm}")
+                    optimizer.zero_grad(set_to_none=True)
                 scaler.update()
+
+                logger.log({"train/grad_norm": grad_norm.item()}, epoch)
 
             # Synchronize CUDA before timing measurements
             if device.startswith("cuda"):
