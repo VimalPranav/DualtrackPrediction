@@ -1,7 +1,9 @@
 import argparse
 from src.engine.tracking_estimator import BaseTrackingEstimator
 from src.models.model_registry import get_model, register_model
-
+from src.models.spatio_temporal_attn import (
+    ViTForSpatialAttention,
+)
 from src.utils.pose import (
     get_absolute_to_global_transforms_torch,
     get_relative_transforms_torch,
@@ -10,7 +12,7 @@ from src.utils.pose import (
 )
 import torch
 from torch import nn
-from src.models.bert import BertConfig, BertEncoder
+from src.models.bert import BertEncoder, BertConfig
 
 
 class SpatialMeanPooling(nn.Module):
@@ -43,7 +45,7 @@ class SimpleModelForSparseTrackingEstimation(BaseTrackingEstimator, nn.Module):
         backbone,
         n_features=512,
         max_seq_length=1024,
-        hidden_size=512,
+        hidden_size=256,
         pred_mode="local",
         num_hidden_layers=8,
         position_embedding_type="absolute",
@@ -54,13 +56,12 @@ class SimpleModelForSparseTrackingEstimation(BaseTrackingEstimator, nn.Module):
         self.features_only = features_only
         self.backbone = backbone
         self.pos_emb = (
-            nn.Embedding(max_seq_length+1, hidden_size)
+            nn.Embedding(max_seq_length, hidden_size)
             if position_embedding_type == "absolute"
             else None
         )
         self.pred_mode = pred_mode
         self.position_embedding_type = position_embedding_type
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
 
         self.proj = torch.nn.Linear(n_features, hidden_size)
         cfg = BertConfig(
@@ -78,93 +79,47 @@ class SimpleModelForSparseTrackingEstimation(BaseTrackingEstimator, nn.Module):
         feats = self.backbone(images)  # B N C
         feats = self.proj(feats)
 
-        B = feats.shape[0]
-        cls = self.cls_token.expand(B, -1, -1)
-
-        feats = torch.cat([cls, feats], dim=1)
-
         if self.pos_emb is not None:
-            cls_indices = torch.zeros(
-                B, 1,
-                dtype=sample_indices.dtype,
-                device=sample_indices.device
-            )
-
-            frame_indices = sample_indices + 1
-
-            position_indices = torch.cat(
-                [cls_indices, frame_indices],
-                dim=1
-            )
-
-            pos_emb = self.pos_emb(position_indices)
+            pos_emb = self.pos_emb(sample_indices)
             feats = feats + pos_emb
 
         bert_outputs = self.bert(
-            feats
+            feats,
+            position_ids=(
+                sample_indices if self.position_embedding_type != "absolute" else None
+            ),
         ).last_hidden_state
 
-        cls_feature = bert_outputs[:, 0, :]
-        frame_features = bert_outputs[:, 1:, :]
-        pose_pred = self.fc(frame_features[:, 1:, :])
-
         if self.features_only:
-            return {
-                "pose": pose_pred,
-                "frame_features": frame_features,
-                "cls_feature": cls_feature,
-            }
+            return bert_outputs
 
         if self.pred_mode == "local":
-            return self.fc(frame_features)
-
+            return self.fc(bert_outputs)[:, 1:, :]
         elif self.pred_mode == "global":
-
-            pred = self.fc(frame_features)
-
-            out = {
-                "global": pred
-            }
-            pred_matrix = pose_vector_to_rotation_matrix_torch(pred)
-            pred_local = get_relative_transforms_torch(pred_matrix)
-            pred_local = rotation_matrix_to_pose_vector_torch(pred_local)
-
-            out["local"] = pred_local.detach()
-
+            out = {}
+            pred = self.fc(bert_outputs)
+            pred[:, 0, :] = 0
+            out["global"] = pred[:, 1:, :]
+            pred = pose_vector_to_rotation_matrix_torch(pred)
+            pred = get_relative_transforms_torch(pred)
+            pred = rotation_matrix_to_pose_vector_torch(pred)
+            out["local"] = pred.detach()
             return out
-
         elif self.pred_mode == "absolute":
-
-            pred = self.fc(frame_features)
-            out = {
-                "absolute": pred
-            }
-            pred_detached = pred.detach()
-            pred_matrix = pose_vector_to_rotation_matrix_torch(
-                pred_detached
-            )
-
-            pred_glob = get_absolute_to_global_transforms_torch(
-                pred_matrix
-            )[..., 1:, :, :]
-            pred_glob = rotation_matrix_to_pose_vector_torch(
-                pred_glob
-            )
-
+            out = {}
+            pred = self.fc(bert_outputs)
+            out["absolute"] = pred
+            pred = pred.detach()
+            pred = pose_vector_to_rotation_matrix_torch(pred)
+            pred_glob = get_absolute_to_global_transforms_torch(pred)[..., 1:, :, :]
+            pred_glob = rotation_matrix_to_pose_vector_torch(pred_glob)
             out["global"] = pred_glob
-
-            pred_loc = get_relative_transforms_torch(
-                pred_matrix
-            )
-            pred_loc = rotation_matrix_to_pose_vector_torch(
-                pred_loc
-            )
-
+            pred_loc = get_relative_transforms_torch(pred)
+            pred_loc = rotation_matrix_to_pose_vector_torch(pred_loc)
             out["local"] = pred_loc
             return out
-
         else:
-            raise ValueError(f"Unknown pred_mode: {self.pred_mode}")
+            raise ValueError()
 
     def predict(self, batch):
         device = next(self.parameters()).device
@@ -175,57 +130,40 @@ class SimpleModelForSparseTrackingEstimation(BaseTrackingEstimator, nn.Module):
 
         pred = pred if pred is not None else self.predict(batch)
 
-        if not isinstance(pred, dict):
-            raise TypeError(
-                f"Expected model output to be dict, got {type(pred)}"
-            )
-
-        pose_pred = pred["pose"]
         targets = batch["targets"].to(device)
-
         padding_lengths = batch["padding_size"]
-
-        if pose_pred.shape != targets.shape:
-            raise RuntimeError(
-                f"Pose/target shape mismatch: "
-                f"pose_pred={pose_pred.shape}, targets={targets.shape}"
-            )
-
         crit = nn.MSELoss(reduction="none")
 
-        B, N, D = pose_pred.shape
-
-        mask = torch.ones(
-            B,
-            N,
-            D,
-            dtype=torch.bool,
-            device=device,
-        )
-
-        for i, padding_length in enumerate(padding_lengths):
-
-            if padding_length > 0:
-
-                # Prevent invalid padded pose entries
-                mask[i, -padding_length:, :] = False
-
-        loss = crit(pose_pred, targets)
-
-        masked_loss = torch.where(
-            mask,
-            loss,
-            torch.nan,
-        )
-
-        pose_loss = masked_loss.nanmean()
-
-        if torch.is_grad_enabled() and not pose_loss.requires_grad:
-            raise RuntimeError(
-                "Pose loss is detached from the computation graph!"
+        def _get_loss(pred, targets):
+            B, N, D = (
+                pred.shape
+                if isinstance(pred, torch.Tensor)
+                else list(pred.values())[0].shape
             )
 
-        return pose_loss
+            mask = torch.ones(B, N, D, dtype=torch.bool, device=device)
+            for i, padding_length in enumerate(padding_lengths):
+                if padding_length > 0:
+                    mask[i, -padding_length:, :] = 0
+
+            loss = crit(pred, targets)
+            masked_loss = torch.where(mask, loss, torch.nan)
+            mse_loss_val = masked_loss.nanmean()
+            return mse_loss_val
+
+        if isinstance(pred, dict):
+            loss = torch.tensor(0.0, device=device)
+            if "local" in pred:
+                loss += _get_loss(pred["local"], targets)
+            if "global" in pred:
+                loss += _get_loss(pred["global"], batch["targets_global"].to(device))
+            if "absolute" in pred:
+                loss += _get_loss(
+                    pred["absolute"], batch["targets_absolute"].to(device)
+                )
+            return loss
+        else:
+            return _get_loss(pred, targets)
 
 
 
@@ -239,6 +177,25 @@ def simple_rn_no_temporal_backbone():
     return VideoResnetWrapperForFeatureMaps(video_rn18_no_temporal())
 
 
+@register_model
+def simple_sparse_tracking_estimator(
+    backbone="usfm_for_3d_feature_maps",
+    backbone_kwargs={},
+    image_size=224,
+    n_features=256,
+    **kwargs,
+):
+
+    if backbone == "usfm_for_3d_feature_maps":
+        _backbone_kwargs = {"projection_dim": n_features, "image_size": image_size}
+    else:
+        _backbone_kwargs = {}
+    _backbone_kwargs.update(backbone_kwargs)
+    backbone = get_model(backbone, **_backbone_kwargs)
+    return SimpleModelForSparseTrackingEstimation(
+        backbone, n_features, hidden_size=512, **kwargs
+    )
+
 
 @register_model
 def global_encoder_cnn(
@@ -249,12 +206,69 @@ def global_encoder_cnn(
         simple_rn_no_temporal_backbone(), 
         SpatialMeanPooling()
     )
-
     return SimpleModelForSparseTrackingEstimation(
         backbone,
         n_features=512,
         feature_map_size=feature_map_size,
         hidden_size=512,
-        features_only=True,
         **kwargs,
     )
+
+
+@register_model
+def global_encoder_usfm(
+    backbone_weights=None, image_size=224, feature_map_size=14, **kwargs
+):
+    from src.models.model_registry import usfm_for_3d_feature_maps
+
+    backbone = nn.Sequential(
+        usfm_for_3d_feature_maps(image_size, projection_dim=256, lora_rank=32), 
+        SpatialMeanPooling(),
+    )
+    
+    return SimpleModelForSparseTrackingEstimation(
+        backbone,
+        n_features=256,
+        feature_map_size=feature_map_size,
+        hidden_size=512,
+        **kwargs,
+    )
+
+
+@register_model
+def global_encoder_medsam(
+    backbone_weights=None, image_size=224, feature_map_size=14, **kwargs
+):
+    from src.models.model_registry import sam_for_3d_feature_maps
+
+    backbone = nn.Sequential(
+        sam_for_3d_feature_maps(variant="medsam"), 
+        SpatialMeanPooling()
+    )
+
+    return SimpleModelForSparseTrackingEstimation(
+        backbone,
+        n_features=256,
+        **kwargs,
+        feature_map_size=feature_map_size,
+        hidden_size=512,
+    )
+
+
+@register_model
+def global_encoder_ibot(backbone_weights=None, image_size=224, **kwargs):
+    from src.models.model_registry import ibot_vit_for_video_feature_extraction
+
+    backbone = ibot_vit_for_video_feature_extraction(
+        backbone_weights,
+        in_chans=1,
+    )
+    return SimpleModelForSparseTrackingEstimation(backbone, n_features=192, **kwargs)
+
+
+REGISTERED_GLOBAL_ENCODER_MODELS = [
+    "global_encoder_cnn",
+    "global_encoder_usfm",
+    "global_encoder_medsam",
+    "global_encoder_ibot",
+]

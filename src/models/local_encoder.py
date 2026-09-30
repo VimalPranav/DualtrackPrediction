@@ -13,11 +13,10 @@ from src.models.utils import (
     apply_model_chunked,
     temporal_tiled_exact,
 )
-
-from .spatio_temporal_attn import SimpleTemporalAttn
-from .mamba_temporal import SimpleTemporalMamba
+from src.models.spatio_temporal_attn import SimpleTemporalAttn
 from .model_registry import get_model, register_model as _register_model
 from src.models.video_resnet import VideoResnetWrapperForFeatureMaps
+
 
 MODELS = []
 
@@ -25,6 +24,7 @@ MODELS = []
 def register_model(fn):
     MODELS.append(fn.__name__)
     return _register_model(fn)
+
 
 class VideoResnetTrackingEstimator(LocalEncoderTrackingEstimator, nn.Module):
     def __init__(
@@ -156,14 +156,15 @@ class FeatureExtractorWithSpatialSelfAttentionV1(
         )
         self.fc = torch.nn.Linear(hidden_size, 6)
 
-    def forward(self, frames=None, backbone_feature_maps=None, return_stage2_pose=False):
-        return self._forward_impl(
-            frames=frames,
-            backbone_feature_maps=backbone_feature_maps,
-            return_stage2_pose=return_stage2_pose,
-        )
+    def forward(self, x):
+        if self.input_type == 'frames':
+            return self._forward_impl(frames=x)
+        elif self.input_type == 'features':
+            return self._forward_impl(backbone_feature_maps=x)
+        else:
+            raise ValueError(f"Unknown input type: {self.input_type}")
 
-    def _forward_impl(self, frames=None, backbone_feature_maps=None, return_stage2_pose=False):
+    def _forward_impl(self, frames=None, backbone_feature_maps=None):
 
         if backbone_feature_maps is None:
             assert frames is not None
@@ -185,12 +186,6 @@ class FeatureExtractorWithSpatialSelfAttentionV1(
 
         cls_tokens = einops.rearrange(cls_tokens, "(b n) c -> b n c", b=B, n=N)
         if self.features_only:
-            if return_stage2_pose:
-                return {
-                    "features": cls_tokens,
-                    "stage2_pose": self.fc(cls_tokens)[:,1:,:]
-                }
-
             return cls_tokens
 
         outputs = self.fc(cls_tokens)
@@ -206,7 +201,7 @@ class FeatureExtractorWithSpatialSelfAttentionV1(
             backbone_features = None
 
         return self(frames, backbone_features)
-    
+
 
 @register_model
 def cnn_sp_attn(
@@ -262,7 +257,6 @@ class LocalEncoderSPTAttn(
         self.backbone = backbone
         self.temporal_encoder = temporal_encoder
         self.features_only = features_only
-        self.alpha = nn.Parameter(torch.full((6,), -5.0))
 
     # def forward_intermediates(self, x):
     #     if self.use_cache and hasattr(self, "_current_data_ids"):
@@ -284,51 +278,12 @@ class LocalEncoderSPTAttn(
     #         return x
 
     def forward(self, x):
-
-        backbone_out = self.backbone(x, return_stage2_pose=True)
-
+        x = self.backbone(x)
+        
         if self.features_only:
-            return backbone_out
+            return x
 
-        if not hasattr(self, "_printed"):
-            stage2_pose = backbone_out["stage2_pose"]
-
-            print("=" * 60)
-            print("Stage2 pose shape :", stage2_pose.shape)
-            print("Stage2 pose mean  :", stage2_pose.mean().item())
-            print("Stage2 pose std   :", stage2_pose.std().item())
-
-            features = backbone_out["features"]
-            print("Feature shape     :", features.shape)
-
-            self._printed = True
-
-        features = backbone_out["features"]
-        stage2_pose = backbone_out["stage2_pose"]
-
-        delta_pose = self.temporal_encoder(features)
-
-        if not hasattr(self, "_printed_delta"):
-            print("Delta abs mean:", delta_pose.abs().mean().item())
-            print("Delta std     :", delta_pose.std().item())
-            self._printed_delta = True
-
-        gate = torch.sigmoid(self.alpha)
-
-        if not hasattr(self, "_printed_gate"):
-            print("Gate =", gate.detach().cpu())
-            self._printed_gate = True
-
-        prediction = stage2_pose + gate * delta_pose
-
-        if not hasattr(self, "_printed_gate"):
-            print("Gate:", gate)
-            print("Prediction mean:", prediction.mean().item())
-            print("Prediction std :", prediction.std().item())
-            print("=" * 60)
-            self._printed_gate = True
-
-        return prediction
+        return self.temporal_encoder(x)
 
 
 class TrackingEstimatorWithSequenceBackbone(nn.Module): 
@@ -369,7 +324,7 @@ def cnn_sp_attn_then_temp_attn(
     backbone_cfg['features_only'] = True
     backbone = get_model(**backbone_cfg)
     backbone = FrozenModuleWrapper(backbone, frozen=freeze_backbone, always_eval_mode=keep_backbone_in_eval_mode)
-    temporal_encoder = SimpleTemporalMamba(
+    temporal_encoder = SimpleTemporalAttn(
         **kwargs, hidden_size=hidden_size, features_only=features_only
     )
 
@@ -377,6 +332,53 @@ def cnn_sp_attn_then_temp_attn(
         backbone, temporal_encoder
     )
 
+
+@register_model
+def cnn_sp_attn_then_roformer(
+    *,
+    backbone_cfg=dict(name="cnn_sp_attn"),
+    freeze_backbone=True,
+    roformer_model="roformer_small",
+    **kwargs,
+):
+    """
+    Attaches a temporal attention module to the output of a pooled  spatial attention module.
+
+    Args:
+        backbone_cfg (dict): Configuration for the backbone model (should be cnn).
+        freeze_backbone (bool): Whether to freeze the backbone model.
+        input_mode (str): Whether the input to the model is images or features. If images, the backbone is applied to the input. If features, the input is assumed to be the output of the backbone.
+        **kwargs: Additional arguments to pass to the temporal attention module.
+    """
+
+    backbone_cfg = dict(**backbone_cfg)
+    backbone_cfg['features_only'] = True
+    backbone = get_model(**backbone_cfg) 
+    backbone = FrozenModuleWrapper(backbone, frozen=freeze_backbone)
+    
+    class RoFormerWrapper(nn.Module): 
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+        
+        def forward(self, x): 
+            x = self.model(x)
+
+            return x['x_norm_patchtokens']
+
+    from .roformer import roformer as roformer_models
+    roformer = roformer_models.__dict__[roformer_model](
+        **kwargs
+    )
+    roformer.init_weights()
+    embed_dim = roformer.embed_dim
+    roformer = RoFormerWrapper(roformer)
+
+    backbone = nn.Sequential(
+        backbone, roformer
+    )
+    
+    return TrackingEstimatorWithSequenceBackbone(backbone, embed_dim=embed_dim)
 
 
 @register_model

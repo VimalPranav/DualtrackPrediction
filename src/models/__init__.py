@@ -6,3 +6,4 @@ get_model / list_models are re-exported here for convenience.
  
 from .global_encoder import global_encoder_cnn
 from .model_registry import get_model, list_models, register_model 
+from .fusion_model.fusion_model import *
