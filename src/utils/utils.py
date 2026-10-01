@@ -122,8 +122,32 @@ def load_model_weights(model, path_or_state, strict=True, handle_size_mismatch=T
             k[len(state_dict_prefix):]: v for k, v in state.items() if k.startswith(state_dict_prefix)
         }
 
+    model_state = model.state_dict()
+    vit_key_replacements = (
+        (".vit.encoder.layer.", ".vit.layers."),
+        (".attention.attention.query.", ".attention.q_proj."),
+        (".attention.attention.key.", ".attention.k_proj."),
+        (".attention.attention.value.", ".attention.v_proj."),
+        (".attention.output.dense.", ".attention.o_proj."),
+        (".intermediate.dense.", ".mlp.fc1."),
+        (".output.dense.", ".mlp.fc2."),
+    )
+    compatible_state = {}
+    for key, value in state.items():
+        target_key = key
+        for old, new in vit_key_replacements:
+            target_key = target_key.replace(old, new)
+        if (
+            target_key != key
+            and target_key in model_state
+            and value.size() == model_state[target_key].size()
+        ):
+            compatible_state[target_key] = value
+        else:
+            compatible_state[key] = value
+    state = compatible_state
+
     if handle_size_mismatch: 
-        model_state = model.state_dict()
         filtered_state_dict = {
             k: v for k, v in state.items()
             if k in model_state and v.size() == model_state[k].size()

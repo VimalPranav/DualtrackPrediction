@@ -3,11 +3,10 @@ import random
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from inspect import isclass, isfunction
-from typing import Literal, Sequence
+from typing import Literal, Optional, Sequence
 import warnings
 
 import numpy as np
-from git import Optional
 from torchvision.transforms.v2 import *
 import torch
 
