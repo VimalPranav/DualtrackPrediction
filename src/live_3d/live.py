@@ -1,5 +1,8 @@
 import argparse
 import csv
+import os
+import time
+import threading
 from collections import deque
 from pathlib import Path
 
@@ -8,11 +11,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
-from scipy.spatial.transform import Rotation
 
 from src.models import get_model
 from src.live_3d.bin_filling import bin_fill
 from src.live_3d.gaussian_splatting import gaussian_weighted_splat
+from src.live_3d.VNN import voxel_nearest_neighbor
+from src.live_3d.fbm import fbm_rbf_reconstruct
 
 
 DEFAULT_CONFIG = Path(__file__).parent / "config/model/dualtrack_ft_tus_rec_2025.yaml"
@@ -22,6 +26,84 @@ DEFAULT_CHECKPOINT = (
 )
 DEFAULT_CALIBRATION = Path(__file__).parent / "calib_matrix.csv"
 
+
+
+
+def measure_grid_coverage(sample_points, voxel_size, support_radius_mm, max_grid_voxels=5_000_000):
+    """Measure sample-supported coverage on a fixed grid, independent of method output."""
+    from scipy.spatial import cKDTree
+
+    points = np.asarray(sample_points, dtype=np.float64)
+    if points.size == 0:
+        return {"grid_voxels": 0, "supported_voxels": 0,
+                "coverage_percent": 0.0, "hole_ratio_percent": 100.0}
+    lo = points.min(axis=0)
+    hi = points.max(axis=0)
+    shape = np.maximum(1, np.ceil((hi - lo) / voxel_size).astype(np.int64))
+    total = int(np.prod(shape, dtype=np.int64))
+    if total > max_grid_voxels:
+        raise ValueError(
+            f"Coverage grid would contain {total:,} voxels (limit {max_grid_voxels:,}). "
+            "Use a larger --voxel-size or increase the limit in the script."
+        )
+    axes = [lo[d] + (np.arange(shape[d]) + 0.5) * voxel_size for d in range(3)]
+    tree = cKDTree(points)
+    supported_count = 0
+    # Chunk along X to avoid allocating all grid coordinates at once.
+    for ix, x in enumerate(axes[0]):
+        yy, zz = np.meshgrid(axes[1], axes[2], indexing="ij")
+        grid = np.column_stack((np.full(yy.size, x), yy.ravel(), zz.ravel()))
+        distances, _ = tree.query(grid, k=1, workers=-1)
+        supported_count += int(np.count_nonzero(distances <= support_radius_mm))
+    coverage = 100.0 * supported_count / total
+    return {"grid_voxels": total, "supported_voxels": supported_count,
+            "coverage_percent": coverage, "hole_ratio_percent": 100.0 - coverage}
+
+
+def save_benchmark_csv(path, row):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists()
+    with path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def crop_final_volume_to_bright_region(
+    points, intensities, threshold_quantile=0.85, margin_fraction=0.08
+):
+    """Crop the FINAL volume around brighter ultrasound structures.
+
+    Bright voxels determine the crop bounds, but all voxels inside those bounds
+    are retained so darker internal anatomy is not automatically discarded.
+    This function is intended for the final volume only, not live windows.
+    """
+    points = np.asarray(points)
+    intensities = np.asarray(intensities)
+
+    if len(points) == 0 or len(intensities) != len(points):
+        return points, intensities
+
+    threshold = np.quantile(intensities, threshold_quantile)
+    seed_mask = intensities >= threshold
+    seed_points = points[seed_mask]
+    if len(seed_points) == 0:
+        return points, intensities
+
+    # Bounding box around stronger echoes. Add a margin to preserve nearby tissue.
+    lo = seed_points.min(axis=0)
+    hi = seed_points.max(axis=0)
+    full_extent = points.max(axis=0) - points.min(axis=0)
+    margin = np.maximum(full_extent * margin_fraction, 1e-6)
+    lo = lo - margin
+    hi = hi + margin
+
+    keep = np.all((points >= lo) & (points <= hi), axis=1)
+    if not np.any(keep):
+        return points, intensities
+    return points[keep], intensities[keep]
 
 def load_frames(input_path):
 	"""Load frames from either a processed DualTrack H5 or a raw TUS-REC H5."""
@@ -209,6 +291,25 @@ def transform_points(points, T):
 
     return transformed[:, :3]
 
+def reconstruct_samples(points, intensities, method, voxel_size,
+                        kernel_sigma_mm, kernel_truncate, min_kernel_weight):
+    """Dispatch to Gaussian splatting or VNN for a fair same-input comparison."""
+    if method == "vnn":
+        return voxel_nearest_neighbor(points, intensities, voxel_size)
+    if method == "gaussian":
+        return gaussian_weighted_splat(
+            points=points,
+            intensities=intensities,
+            voxel_size=voxel_size,
+            sigma_mm=kernel_sigma_mm,
+            truncate=kernel_truncate,
+            min_weight=min_kernel_weight,
+        )
+    if method == "fbm":
+        return fbm_rbf_reconstruct(points, intensities, voxel_size)
+        
+    raise ValueError(f"Unknown reconstruction method: {method}")
+
 
 def reconstruct_window(
     raw_frames,
@@ -220,6 +321,8 @@ def reconstruct_window(
     kernel_sigma_mm,
     kernel_truncate,
     min_kernel_weight,
+    method="gaussian",
+    timings=None,
 ):
     """
     Reconstruct the CURRENT sliding window only.
@@ -229,6 +332,7 @@ def reconstruct_window(
     all_intensities = []
 
     for image, T_world_tool in zip(raw_frames, frame_poses):
+        _point_t0 = time.perf_counter()
         tool_points, intensities = image_pixels_to_tool(
             image,
             pixel_to_mm,
@@ -237,6 +341,8 @@ def reconstruct_window(
         )
 
         world_points = transform_points(tool_points, T_world_tool)
+        if timings is not None:
+            timings["point_generation_seconds"] += time.perf_counter() - _point_t0
 
         all_points.append(world_points)
         all_intensities.append(intensities)
@@ -247,14 +353,19 @@ def reconstruct_window(
     all_points = np.concatenate(all_points, axis=0)
     all_intensities = np.concatenate(all_intensities, axis=0)
 
-    return gaussian_weighted_splat(
+    _recon_t0 = time.perf_counter()
+    result = reconstruct_samples(
         points=all_points,
         intensities=all_intensities,
+        method=method,
         voxel_size=voxel_size,
-        sigma_mm=kernel_sigma_mm,
-        truncate=kernel_truncate,
-        min_weight=min_kernel_weight,
+        kernel_sigma_mm=kernel_sigma_mm,
+        kernel_truncate=kernel_truncate,
+        min_kernel_weight=min_kernel_weight,
     )
+    if timings is not None:
+        timings["live_reconstruction_seconds"] += time.perf_counter() - _recon_t0
+    return result
 
 
 class PersistentGaussianVolume:
@@ -274,10 +385,17 @@ class PersistentGaussianVolume:
         self.sample_weight = None
         self.min_idx = None
         self.frame_ids = set()
+        self._sample_points = []
+        self._sample_intensities = []
 
     def add_frame_samples(self, frame_id, points, intensities):
         if frame_id in self.frame_ids or len(points) == 0:
             return False
+
+        # Preserve original samples as well as the Gaussian accumulator so the
+        # final VNN reconstruction can use the same input samples.
+        self._sample_points.append(np.asarray(points, dtype=np.float32).copy())
+        self._sample_intensities.append(np.asarray(intensities, dtype=np.float32).copy())
 
         voxel_indices = np.floor(points / self.voxel_size).astype(np.int64)
         new_min = voxel_indices.min(axis=0)
@@ -333,7 +451,21 @@ class PersistentGaussianVolume:
         self.frame_ids.add(int(frame_id))
         return True
 
-    def reconstruct(self, sigma_mm, truncate, min_weight):
+    def reconstruct(self, sigma_mm, truncate, min_weight, method="gaussian"):
+        if method == "vnn":
+            if not self._sample_points:
+                return np.empty((0, 3)), np.empty((0,))
+            all_points = np.concatenate(self._sample_points, axis=0)
+            all_intensities = np.concatenate(self._sample_intensities, axis=0)
+            return voxel_nearest_neighbor(all_points, all_intensities, self.voxel_size)
+        if method == "fbm":
+            if not self._sample_points:
+                return np.empty((0, 3)), np.empty((0,))
+            all_points = np.concatenate(self._sample_points, axis=0)
+            all_intensities = np.concatenate(self._sample_intensities, axis=0)
+            return fbm_rbf_reconstruct(all_points, all_intensities, self.voxel_size)
+        if method != "gaussian":
+            raise ValueError(f"Unknown reconstruction method: {method}")
         if self.intensity_sum is None:
             return np.empty((0, 3)), np.empty((0,))
 
@@ -380,11 +512,13 @@ class LivePointCloud:
         self.o3d = o3d
         self.vis = o3d.visualization.Visualizer()
         self.vis.create_window(
-            window_name="Live 3D Ultrasound - Sliding Window Bin Filling",
+            window_name="Live 3D Ultrasound - 360 View (Drag to Rotate)",
             width=1100,
             height=800,
         )
 
+        # Open3D's native mouse controls stay enabled during live updates:
+        # left-drag rotates, mouse wheel zooms, right-drag pans.
         self.pcd = o3d.geometry.PointCloud()
         self.geometry_added = False
         self.first_update = True
@@ -471,6 +605,8 @@ class LivePointCloud:
             return True
 
         self._set_cloud(points, intensities)
+        # Only initialize the camera on the first frame. Later updates replace
+        # geometry but preserve the user's manual 360-degree viewing angle.
         self._update_camera(reset=self.first_update)
 
         alive = self.vis.poll_events()
@@ -480,6 +616,7 @@ class LivePointCloud:
             return False
 
         print(f"Viewer: {phase_label} | {len(points)} displayed voxels")
+        print("View controls: left-drag = rotate 360 | scroll = zoom | right-drag = pan")
         return True
 
     def show_final_until_closed(self, points, intensities):
@@ -502,7 +639,8 @@ class LivePointCloud:
         print("FINAL STATIC 3D VOLUME")
         print(f"Displayed voxels: {len(points)}")
         print("The complete accumulated reconstruction is now shown.")
-        print("Rotate/zoom with the mouse. Close the Open3D window to exit.")
+        print("View controls: left-drag = rotate 360 | scroll = zoom | right-drag = pan.")
+        print("Close the Open3D window to exit.")
         print("============================================================")
 
         while not self.closed:
@@ -546,12 +684,15 @@ def run_live_reconstruction(
     kernel_sigma_mm,
     kernel_truncate,
     min_kernel_weight,
+    method,
     rotation_order,
     rotation_degrees,
     accumulate=True,
     auto_rotate=False,
     rotation_step=3.0,
     visualize=True,
+    benchmark_csv="benchmark_results.csv",
+    support_radius_mm=1.5,
 ):
     """
     Live-style sliding-window algorithm.
@@ -602,6 +743,39 @@ def run_live_reconstruction(
     frames_since_last_inference = 0
     first_window_done = False
     last_processed_end_frame = None
+
+    # Benchmark accumulators. Peak RSS is sampled in the background during processing.
+    benchmark_start = time.perf_counter()
+    timings = {"inference_seconds": 0.0, "live_reconstruction_seconds": 0.0,
+               "final_reconstruction_seconds": 0.0, "point_generation_seconds": 0.0}
+    memory_samples = {"peak_rss_mb": 0.0, "peak_cpu_percent": 0.0,
+                      "cpu_percent_sum": 0.0, "cpu_samples": 0}
+    sampler_stop = threading.Event()
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        process.cpu_percent(interval=None)  # Prime the CPU utilization counter.
+        def sample_memory():
+            while not sampler_stop.is_set():
+                try:
+                    rss = process.memory_info().rss / (1024 ** 2)
+                    cpu_pct = process.cpu_percent(interval=None)
+                    memory_samples["peak_rss_mb"] = max(memory_samples["peak_rss_mb"], rss)
+                    memory_samples["peak_cpu_percent"] = max(memory_samples["peak_cpu_percent"], cpu_pct)
+                    memory_samples["cpu_percent_sum"] += cpu_pct
+                    memory_samples["cpu_samples"] += 1
+                except Exception:
+                    pass
+                sampler_stop.wait(0.1)
+        sampler_thread = threading.Thread(target=sample_memory, daemon=True)
+        sampler_thread.start()
+    except ImportError:
+        process = None
+        sampler_thread = None
+        print("Benchmark note: install psutil for CPU/RAM measurements: python -m pip install psutil")
+
+    process_elapsed_before_final_view = None
+    final_metric_row = None
 
     try:
             with torch.inference_mode():
@@ -655,7 +829,11 @@ def run_live_reconstruction(
     
                     # For N input frames, DualTrack is expected to return N-1
                     # consecutive relative transforms.
+                    _t0 = time.perf_counter()
                     window_prediction = model.predict(batch)[0]
+                    if str(device).startswith("cuda"):
+                        torch.cuda.synchronize(device)
+                    timings["inference_seconds"] += time.perf_counter() - _t0
                     predictions = window_prediction.detach().cpu().numpy()
     
                     if len(predictions) != window_size - 1:
@@ -664,9 +842,8 @@ def run_live_reconstruction(
                             f"got {len(predictions)}"
                         )
     
-                    # --------------------------------------------------------
                     # FIRST WINDOW
-                    # --------------------------------------------------------
+               
                     if not first_window_done:
                         absolute_poses[start_frame] = np.eye(
                             4, dtype=np.float64
@@ -688,13 +865,6 @@ def run_live_reconstruction(
     
                         first_window_done = True
     
-                    # --------------------------------------------------------
-                    # LATER OVERLAPPING WINDOWS
-                    #
-                    # Do NOT re-integrate overlapping transitions.
-                    # Only extend the trajectory when frame_to has not been
-                    # assigned an absolute pose yet.
-                    # --------------------------------------------------------
                     else:
                         new_pose_count = 0
     
@@ -742,16 +912,9 @@ def run_live_reconstruction(
                         absolute_poses[idx] for idx in window_indices
                     ]
     
-                    # --------------------------------------------------------
                     # 3D RECONSTRUCTION
-                    # --------------------------------------------------------
-                    # IMPORTANT:
                     #   1. Reconstruct the CURRENT 16-frame window for the live viewer.
                     #   2. In parallel, add only NEW frames to the persistent global volume.
-                    #
-                    # The global volume is deliberately NOT displayed during the scan.
-                    # It will replace the sliding-window cloud only after the input
-                    # stream reaches its final frame.
     
                     current_cloud_points, current_cloud_intensities = reconstruct_window(
                         raw_frames=list(raw_buffer),
@@ -763,10 +926,12 @@ def run_live_reconstruction(
                         kernel_sigma_mm=kernel_sigma_mm,
                         kernel_truncate=kernel_truncate,
                         min_kernel_weight=min_kernel_weight,
+                        method=method,
+                        timings=timings,
                     )
     
                     print(
-                        f"Live Gaussian reconstruction [{start_frame}:{end_frame + 1}] -> "
+                        f"Live {method.upper()} reconstruction [{start_frame}:{end_frame + 1}] -> "
                         f"{len(current_cloud_points)} voxels"
                     )
     
@@ -780,6 +945,7 @@ def run_live_reconstruction(
                             if idx in global_volume.frame_ids:
                                 continue
     
+                            _point_t0 = time.perf_counter()
                             tool_points, intensities = image_pixels_to_tool(
                                 image,
                                 pixel_to_mm,
@@ -787,6 +953,7 @@ def run_live_reconstruction(
                                 pixel_stride=pixel_stride,
                             )
                             world_points = transform_points(tool_points, pose)
+                            timings["point_generation_seconds"] += time.perf_counter() - _point_t0
                             global_volume.add_frame_samples(
                                 idx, world_points, intensities
                             )
@@ -814,9 +981,8 @@ def run_live_reconstruction(
                     last_processed_end_frame = end_frame
                     frames_since_last_inference = 0
     
-            # ------------------------------------------------------------
             # END-OF-STREAM FLUSH
-            # ------------------------------------------------------------
+
             # If the total frame count is not aligned with the chosen stride, the
             # final few frames may not have triggered a normal sliding-window
             # inference. Run the last complete 16-frame window once so that frames
@@ -850,8 +1016,12 @@ def run_live_reconstruction(
                             final_local_images.unsqueeze(0).to(device),
                     }
     
+                    _infer_t0 = time.perf_counter()
                     with torch.inference_mode():
                         final_prediction = model.predict(final_batch)[0]
+                    if str(device).startswith("cuda") and torch.cuda.is_available():
+                        torch.cuda.synchronize(device)
+                    timings["inference_seconds"] += time.perf_counter() - _infer_t0
                     final_predictions = (
                         final_prediction.detach().cpu().numpy()
                     )
@@ -919,34 +1089,99 @@ def run_live_reconstruction(
                             f"{len(global_volume.frame_ids)} frames"
                         )
     
-            # ------------------------------------------------------------
             # END OF STREAM: SWITCH FROM LIVE WINDOW TO FINAL VOLUME
-            # ------------------------------------------------------------
             if viewer is not None and global_volume is not None and not viewer.closed:
                 print("\nInput stream finished.")
                 print("Reconstructing the complete accumulated volume...")
     
+                _final_recon_t0 = time.perf_counter()
                 final_points, final_intensities = global_volume.reconstruct(
                     sigma_mm=kernel_sigma_mm,
                     truncate=kernel_truncate,
                     min_weight=min_kernel_weight,
+                    method=method,
                 )
+                timings["final_reconstruction_seconds"] += time.perf_counter() - _final_recon_t0
     
                 print(
-                    f"Final global Gaussian reconstruction: "
+                    f"Final global {method.upper()} reconstruction: "
                     f"{len(global_volume.frame_ids)} frames -> "
                     f"{len(final_points)} voxels"
                 )
     
-                # The current 16-frame live cloud is replaced here by the complete
-                # 0..last-frame reconstruction. show_final_until_closed() keeps the
-                # same Open3D window alive until the user closes it manually.
+                # Crop ONLY the final volume around brighter ultrasound structures.
+                # Live sliding-window reconstructions are left unchanged.
+                before_crop = len(final_points)
+                final_points, final_intensities = crop_final_volume_to_bright_region(
+                    final_points,
+                    final_intensities,
+                    threshold_quantile=0.85,  # top 15% intensities define the ROI
+                    margin_fraction=0.08,     # preserve 8% of full extent around it
+                )
+                print(
+                    f"Final-volume crop: {before_crop} -> {len(final_points)} voxels"
+                )
+
+                # Metrics are computed from the original sample points, not the cropped display cloud.
+                if global_volume is not None and global_volume._sample_points:
+                    all_sample_points = np.concatenate(global_volume._sample_points, axis=0)
+                    try:
+                        coverage_metrics = measure_grid_coverage(
+                            all_sample_points, voxel_size, support_radius_mm
+                        )
+                    except ValueError as exc:
+                        print(f"Coverage metric skipped: {exc}")
+                        coverage_metrics = {"grid_voxels": 0, "supported_voxels": 0,
+                                            "coverage_percent": float("nan"),
+                                            "hole_ratio_percent": float("nan")}
+                else:
+                    coverage_metrics = {"grid_voxels": 0, "supported_voxels": 0,
+                                        "coverage_percent": float("nan"), "hole_ratio_percent": float("nan")}
+
+                process_elapsed_before_final_view = time.perf_counter() - benchmark_start
+                total_frames = len(global_volume.frame_ids) if global_volume is not None else len(absolute_poses)
+                total_runtime = process_elapsed_before_final_view
+                peak_ram = memory_samples["peak_rss_mb"]
+                gpu_peak_mb = float("nan")
+                if str(device).startswith("cuda") and torch.cuda.is_available():
+                    gpu_peak_mb = torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+                final_metric_row = {
+                    "input_file": str(input_h5), "method": method, "frames": total_frames,
+                    "voxel_size": voxel_size, "pixel_stride": pixel_stride,
+                    "support_radius_mm": support_radius_mm,
+                    "inference_seconds": timings["inference_seconds"],
+                    "point_generation_seconds": timings["point_generation_seconds"],
+                    "live_reconstruction_seconds_total": timings["live_reconstruction_seconds"],
+                    "final_reconstruction_seconds": timings["final_reconstruction_seconds"],
+                    "processing_runtime_seconds_excluding_final_view": total_runtime,
+                    "peak_rss_mb_sampled": peak_ram,
+                    "peak_cpu_percent_sampled": memory_samples["peak_cpu_percent"],
+                    "mean_cpu_percent_sampled": (memory_samples["cpu_percent_sum"] / memory_samples["cpu_samples"] if memory_samples["cpu_samples"] else float("nan")),
+                    "peak_gpu_allocated_mb": gpu_peak_mb,
+                    "grid_voxels": coverage_metrics["grid_voxels"],
+                    "supported_voxels": coverage_metrics["supported_voxels"],
+                    "coverage_percent": coverage_metrics["coverage_percent"],
+                    "hole_ratio_percent": coverage_metrics["hole_ratio_percent"],
+                    "final_voxels_before_crop": before_crop,
+                    "final_voxels_after_crop": len(final_points),
+                }
+                save_benchmark_csv(benchmark_csv, final_metric_row)
+                print("\n========== BENCHMARK SUMMARY ==========")
+                for key, value in final_metric_row.items():
+                    print(f"{key}: {value}")
+                print(f"Saved benchmark row to: {benchmark_csv}")
+                print("=======================================\n")
+
+                # Keep the final cropped volume open until manually closed.
                 viewer.show_final_until_closed(
                     final_points,
                     final_intensities,
                 )
 
     finally:
+        sampler_stop.set()
+        if sampler_thread is not None:
+            sampler_thread.join(timeout=1.0)
         if viewer is not None:
             viewer.close()
 
@@ -962,8 +1197,8 @@ def save_predictions(predictions, output_path):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Sliding-window DualTrack inference with calibrated "
-            "bin-filled live 3D ultrasound reconstruction."
+            "Sliding-window DualTrack inference with interactive 360-degree "
+            "live 3D ultrasound reconstruction."
         )
     )
 
@@ -1010,6 +1245,14 @@ def main():
         type=float,
         default=1.0,
         help="Voxel size in the same physical units as the reconstructed coordinates",
+    )
+    parser.add_argument(
+        "--method",
+        choices=("gaussian", "vnn", "fbm"),
+        default="gaussian",
+        help=("Reconstruction method: gaussian = normalized Gaussian splatting; "
+              "vnn = Voxel-Based Nearest Neighbor, assigning every grid voxel "
+              "the nearest sample intensity."),
     )
     parser.add_argument(
         "--kernel-sigma-mm",
@@ -1074,6 +1317,15 @@ def main():
         action="store_true",
     )
 
+    parser.add_argument(
+        "--benchmark-csv", type=Path, default=Path("benchmark_results.csv"),
+        help="CSV file to append runtime, memory, coverage, and hole metrics to",
+    )
+    parser.add_argument(
+        "--support-radius-mm", type=float, default=1.5,
+        help="Fixed distance threshold for sample-supported coverage (mm)",
+    )
+
     args = parser.parse_args()
 
     if args.window_size < 2:
@@ -1084,6 +1336,8 @@ def main():
         parser.error("--pixel-stride must be >= 1")
     if args.voxel_size <= 0:
         parser.error("--voxel-size must be > 0")
+    if args.support_radius_mm <= 0:
+        parser.error("--support-radius-mm must be > 0")
     if args.kernel_sigma_mm <= 0:
         parser.error("--kernel-sigma-mm must be > 0")
     if args.kernel_truncate <= 0:
@@ -1102,6 +1356,7 @@ def main():
     print(f"Sliding stride: {args.stride}")
     print(f"Pixel stride: {args.pixel_stride}")
     print(f"Voxel size: {args.voxel_size}")
+    print(f"Reconstruction method: {args.method}")
     print(f"Gaussian sigma: {args.kernel_sigma_mm} mm")
     print(f"Gaussian truncate: {args.kernel_truncate} sigma")
     print(f"Minimum kernel weight: {args.min_kernel_weight}")
@@ -1117,6 +1372,8 @@ def main():
         args.checkpoint,
         device,
     )
+    if str(device).startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
 
     run_live_reconstruction(
         input_h5=args.input_h5,
@@ -1131,12 +1388,15 @@ def main():
         kernel_sigma_mm=args.kernel_sigma_mm,
         kernel_truncate=args.kernel_truncate,
         min_kernel_weight=args.min_kernel_weight,
+        method=args.method,
         rotation_order=args.rotation_order,
         rotation_degrees=not args.rotation_radians,
         accumulate=not args.no_final_volume,
         auto_rotate=args.auto_rotate,
         rotation_step=args.rotation_step,
         visualize=not args.no_viewer,
+        benchmark_csv=args.benchmark_csv,
+        support_radius_mm=args.support_radius_mm,
     )
     
 if __name__ == "__main__":
