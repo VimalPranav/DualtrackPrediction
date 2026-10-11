@@ -18,6 +18,7 @@ import matplotlib.gridspec as gridspec
 from mpl_toolkits.mplot3d import Axes3D
 from omegaconf import OmegaConf
 from scipy.spatial.transform import Rotation
+import time
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if REPO_ROOT not in sys.path:
@@ -290,6 +291,7 @@ def plot_dashboard(pred, gt, errors, images, path):
     print(f"  ✔  Dashboard    → {path}")
 
 def main():
+    total_start_time = time.perf_counter()
     parser = argparse.ArgumentParser()
     parser.add_argument("--config",     required=True)
     parser.add_argument("--checkpoint", required=True)
@@ -382,7 +384,9 @@ def main():
         plot_dashboard(pred_abs[:N], gt[:N], errors, imgs[:N], os.path.join(out_dir, "dashboard.png"))
 
     print(f"\n{'='*55}")
+    total_elapsed = time.perf_counter() - total_start_time
     print(f"  Done! Results in: {os.path.abspath(args.out_dir)}/")
+    print(f"  Total time: {total_elapsed:.2f} seconds ({total_elapsed/60:.2f} minutes)")
     print(f"{'='*55}\n")
 
 if __name__ == "__main__":
