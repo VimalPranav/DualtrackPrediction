@@ -1,7 +1,7 @@
 import numpy as np
 
 def fbm_rbf_reconstruct(points, intensities, voxel_size, max_control_points=20000,
-                       neighbors=32, max_grid_voxels=2_000_000, chunk_size=50000):
+                       neighbors=32, max_grid_voxels=5_000_000, chunk_size=50000):
     """Approximate function-based reconstruction using a local RBF interpolant.
 
     A continuous intensity function is fitted to a deterministic subset of samples,
