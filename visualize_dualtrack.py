@@ -312,9 +312,13 @@ def main():
     print("[1/3] Loading data and model...")
     _, val_loader = get_dataloaders(**cfg.data)
 
-    model_cfg = OmegaConf.load("configs/model/dualtrack.yaml")
+    model_cfg_path = os.path.join(
+        REPO_ROOT, "config", "model", "dualtrack_ft_tus_rec_2025.yaml"
+    )
     if "model" in cfg and "local_encoder_cfg" in cfg.model:
         model_cfg = cfg.model
+    else:
+        model_cfg = OmegaConf.load(model_cfg_path)
     model_cfg.checkpoint = args.checkpoint
     model = get_model(**model_cfg); model.eval()
     print("      Ready.")
