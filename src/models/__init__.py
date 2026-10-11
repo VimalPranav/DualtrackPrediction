@@ -4,5 +4,7 @@ Populates the model registry by importing all model definition modules.
 get_model / list_models are re-exported here for convenience.
 """
  
-from .global_encoder import global_encoder_cnn
+from .global_encoder import *
+from .local_encoder import *
 from .model_registry import get_model, list_models, register_model 
+from .fusion_model.fusion_model import *
